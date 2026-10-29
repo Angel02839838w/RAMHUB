@@ -60,6 +60,7 @@ local CFG = {
     AUTO_HOP = false, HOP_MAX_PLAYERS = 3, HOP_NO_ZOMBIES = 0, SCRIPT_FILE = "", SCRIPT_URL = "",
     HOLD_POSITION = true, -- true = el personaje NUNCA se mueve (spot fijo)
     SKIP_ANIM = false, SKIP_MODE = "Acelerar", SKIP_SPEED = 10, -- salto de animaciones (recarga/equipar)
+    SWITCH_SHOTS = 6, SWITCH_TIME = 5, -- cambia de objetivo tras N disparos al mismo (0 = no cambiar) y lo ignora N segundos
     HUMAN = true, HUMAN_REACT = 0.35, HUMAN_MISS = 0.08, HUMAN_JITTER = 0.6, -- modo discreto (comportamiento mas humano)
     OPT_LEVEL = "Ligero", OPT_NEW = true, -- optimizador: Apagado | Ligero | Fuerte | Extremo
 }
@@ -114,6 +115,7 @@ local S = {
     firing = CFG.AUTOFARM, rightHeld = false, lastShot = 0, lastBurst = 0, burst = 0,
     shots = 0, kills = 0, t0 = os.clock(), waiting = nil, target = nil,
     safePos = nil, lastHeal = 0, stuckT = 0, lastPos = nil, reloading = false,
+    skip = setmetatable({}, { __mode = "k" }), curM = nil, curShots = 0, -- cambio de objetivo por disparos
 }
 local AFK = { learning = false, fire = nil, hooked = false, eqTool = nil, lbl = nil, wasOn = false }
 
@@ -891,6 +893,8 @@ sl(TAim, "Retraso entre balas", "SHOT_DELAY", {40,300}, 10, 80, "ms", "AF_SD", 1
 sl(TAim, "Balas por ráfaga", "BURST_SIZE", {1,10}, 1, 3, "", "AF_BS")
 sl(TAim, "Pausa entre ráfagas", "BURST_PAUSE", {100,1000}, 25, 250, "ms", "AF_BP", 1000)
 sl(TAim, "Alineación requerida", "AIM_STRICT", {85,100}, 1, 97, "%", "AF_AS", 100)
+sl(TAim, "Cambiar de objetivo tras N disparos (0 = no)", "SWITCH_SHOTS", {0,30}, 1, 6, "tiros", "AF_SwShots")
+sl(TAim, "Ignorar ese zombie durante", "SWITCH_TIME", {1,30}, 1, 5, "s", "AF_SwTime")
 tg(TAim, "Recarga automática", "AUTO_RELOAD", true, "AF_AR")
 sl(TAim, "Balas entre recargas (si no detecta munición)", "RELOAD_EVERY", {3,60}, 1, 12, "", "AF_RE")
 TAim:CreateSection("Saltar animaciones")
@@ -1294,14 +1298,22 @@ local function scan(root, myChar)
         return a.d < b.d
     end)
     local nearest = list[1]
+    -- zombies a los que ya se les dispararon demasiados tiros: se ignoran un rato
+    local now = os.clock()
+    local pool = {}
+    for _, e in ipairs(list) do
+        local exp = S.skip[e.m]
+        if not exp or now >= exp then pool[#pool + 1] = e end
+    end
+    if #pool == 0 then pool = list end -- si solo quedan descartados, seguimos con ellos
     -- objetivo fijo: mantiene el actual mientras viva y con LOS (evita parpadeo)
     if S.target and S.target.m.Parent and S.target.hum.Health > 0 then
-        for _, e in ipairs(list) do
+        for _, e in ipairs(pool) do
             if e.m == S.target.m and los(cam, e.p.Position, myChar) then S.target = e; return e, #list, nearest end
         end
     end
     S.target = nil
-    for _, e in ipairs(list) do
+    for _, e in ipairs(pool) do
         if los(cam, e.p.Position, myChar) then S.target = e; return e, #list, nearest end
     end
     return nil, #list, nearest
@@ -1529,6 +1541,12 @@ RunServ.Heartbeat:Connect(function(dt)
         end
         if not (CFG.AFK_MODE and AFK.shoot(target)) then fireShot(wt) end
         S.lastShot = now; S.shots += 1; S.burst += 1
+        if S.curM ~= target.m then S.curM = target.m; S.curShots = 0 end
+        S.curShots += 1
+        if CFG.SWITCH_SHOTS > 0 and S.curShots >= CFG.SWITCH_SHOTS then
+            S.skip[target.m] = now + CFG.SWITCH_TIME -- pasa al siguiente zombie
+            S.target = nil; S.curM = nil; S.curShots = 0
+        end
         S.nextDelay = CFG.SHOT_DELAY * (CFG.HUMAN and (0.8 + math.random() * 0.8) or 1)
         if S.burst >= CFG.BURST_SIZE then
             S.burst = 0; S.lastBurst = now
